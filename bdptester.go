@@ -127,7 +127,7 @@ func (this *BaiduYunTester) runSingle(pwd string) bool {
 	if string(bin)[5:16] == `{"errno":0,` {
 		return true
 	}
-	DEBUG.Log("try ["+pwd+"] fail", string(bin)[6:16])
+	DEBUG.Log("try ["+pwd+"] fail ", string(bin)[0:len(bin)])
 	return false
 }
 

